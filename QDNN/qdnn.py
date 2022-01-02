@@ -9,11 +9,25 @@ from qiskit.quantum_info import Statevector
 import multiprocessing as mp
 from effective_dimension import Model
 import qulacs
-from qiskit.quantum_info import partial_trace
 
 # This class creates a quantum model that comprises of a feature map and variational form
 # The measurement and label strategy is hardcoded and the output size = 2
 def u(circuit, start, end):
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[1,1],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[2,2],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[3,3],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[1,2],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[2,1],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[1,3],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[3,1],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[2,3],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start,end],[3,2],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start],[1],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start],[2],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([start],[3],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([end],[1],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([end],[2],np.random.rand())
+    circuit.add_parametric_multi_Pauli_rotation_gate([end],[3],np.random.rand())
     pass
 
 
@@ -52,10 +66,12 @@ class DeepQuantumNeuralNetwork(Model):
         :param post_processing: function, returns dictionary of lists containing indices which determine post processing
         """
         super(DeepQuantumNeuralNetwork, self).__init__()
-        self.num_qubits = np.sum(instructure)
+        num_qubits = np.sum(instructure)
         self.instructure=instructure
-        self.circuit = ParametricQuantumCircuit(self.num_qubits)
+        self.QubitArray=instructure_QubitArray(self.instructure)
+        self.circuit = ParametricQuantumCircuit(num_qubits)
         qnn_instructure(instructure,self.circuit)
+
 
 
         self.d = self.circuit.get_parameter_count()
@@ -140,10 +156,10 @@ class DeepQuantumNeuralNetwork(Model):
         indices += [list(range(end, len(x)))]
 
         # initialize shared array to store results (only supports 1D-array, needs reshaping later)
-        results = mp.Array('d', (len(x) * 2 ** self.instructure[-1]))#ZDZL
+        results = mp.Array('d', (len(x) * 2 ** self.instructure[-1]))
 
         # construct processes to be run in parallel
-        processes = [mp.Process(target=get_probs, args=(inds, params[inds], x[inds], self.circuit, results))
+        processes = [mp.Process(target=get_probs, args=(inds, params[inds], x[inds], self.circuit, results,self.QubitArray[-1]))
                      for inds in indices]
 
         for p in processes:
@@ -152,7 +168,7 @@ class DeepQuantumNeuralNetwork(Model):
             p.join()
 
         aggregated_results = np.zeros((len(x), self.outputsize))
-        num_probs = 2 ** self.circuit.num_qubits
+        num_probs = 2 ** self.instructure[-1]
         for i in range(len(x)):
             start = i * num_probs
             end = (i + 1) * num_probs
@@ -185,9 +201,9 @@ class DeepQuantumNeuralNetwork(Model):
         grads = np.array(grads)
 
         # reshape the dp_thetas
-        full = np.zeros((len(x), self.d, 2 ** self.circuit.num_qubits))
+        full = np.zeros((len(x), self.d, 2 ** self.instructure[-1]))
         for j in range(len(x)):
-            row = np.zeros((self.d, 2 ** self.circuit.num_qubits))
+            row = np.zeros((self.d, 2 ** self.instructure[-1]))
             for i in range(self.d):
                 tensor = grads[i]
                 row[i] += tensor[j]
@@ -238,21 +254,27 @@ class DeepQuantumNeuralNetwork(Model):
         """
 
         # specify function to be run in parallel by each process
-        def get_probs(inds, thetas, datas, circuit, results):
+        def get_probs(inds, thetas, datas, circuit, results, outqubit):
             for i, theta, data in zip(inds, thetas, datas):
-                circuit_ = circuit.assign_parameters(self._get_params_dict(theta, data))
-                result = self.sv.evolve(circuit_)
-                start = i * 2 ** circuit.num_qubits
-                end = (i + 1) * 2 ** circuit.num_qubits
-                results[start:end] = result.probabilities()
+                init_sv = self._data_vec(data)
+                init_state = QuantumState(circuit.get_qubit_count())
+                init_state.load(init_sv)
+
+                self.assign_parameters(circuit, theta)
+
+                circuit.update_quantum_state(init_state)
+                result = init_state.get_vector()
+
+                start = i * 2 ** len(outqubit)
+                end = (i + 1) * 2 ** len(outqubit)
+
+                results[start:end] = self.probabilities(result, outqubit)
 
         # map input to arrays
         params = np.array(params)
         x = np.array(x)
-
         # specify number of parallel processes
         num_processes = 2
-
         # construct index set per process
         indices = []
         start = 0
@@ -264,18 +286,19 @@ class DeepQuantumNeuralNetwork(Model):
         indices += [list(range(end, len(x)))]
 
         # initialize shared array to store results (only supports 1D-array, needs reshaping later)
-        results = mp.Array('d', (len(x) * 2 ** self.circuit.num_qubits))
+        results = mp.Array('d', (len(x) * 2 ** self.instructure[-1]))
 
         # construct processes to be run in parallel
-        processes = [mp.Process(target=get_probs, args=(inds, params[inds], x[inds], self.circuit, results))
+        processes = [mp.Process(target=get_probs, args=(inds, params[inds], x[inds], self.circuit, results,self.QubitArray[-1]))
                      for inds in indices]
 
         for p in processes:
             p.start()
         for p in processes:
             p.join()
+
         probabilities = []
-        num_probs = 2 ** self.circuit.num_qubits
+        num_probs = 2 ** self.instructure[-1]
         for i in range(len(x)):
             start = i * num_probs
             end = (i + 1) * num_probs
@@ -299,8 +322,17 @@ class DeepQuantumNeuralNetwork(Model):
 
 
 if __name__ == '__main__':
+    from effective_dimension import EffectiveDimension
     from qiskit.circuit.library import ZFeatureMap, RealAmplitudes
-    num_qubits = 3
+    import matplotlib.pyplot as plt
+    import numpy as np
+    n = [5000, 8000, 10000, 40000, 60000, 100000, 150000, 200000, 500000, 1000000]
+
+    # number of times to repeat the variational circuit
+    blocks = 1
+
+    # number of qubits, data samples and parameter sets to estimate the effective dimension
+    num_qubits = 4
     num_inputs = 10
     num_thetas = 10
 
@@ -308,7 +340,23 @@ if __name__ == '__main__':
     fm = ZFeatureMap(feature_dimension=num_qubits, reps=1)
 
     # create a variational circuit
+    circ = RealAmplitudes(num_qubits, reps=blocks)
 
     # set up the combined quantum model
-    qnet = DeepQuantumNeuralNetwork([2,3,4], feature_map=fm)
-    qnet._data_vec([1, 2, 3])
+    qnet = DeepQuantumNeuralNetwork([4, 4, 4, 2], feature_map=fm)
+
+    # number of model parameters is d
+    d = qnet.d
+    # set up the effective dimension and compute
+    ed = EffectiveDimension(qnet, num_thetas=num_thetas, num_inputs=num_inputs)
+    f, trace = ed.get_fhat()
+
+    # compute the effective dimension
+    effdim = ed.eff_dim(f, n)
+    ###############################
+
+    # plot the normalised effective dimension for the model
+    plt.plot(n, np.array(effdim) / d)
+    plt.xlabel('number of data')
+    plt.ylabel('normalised effective dimension')
+    plt.show()
