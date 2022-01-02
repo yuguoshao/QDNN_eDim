@@ -1,2 +1,2 @@
-from qdnn import DeepQuantumNeuralNetwork
+from .qdnn import DeepQuantumNeuralNetwork
 __all__ = ['DeepQuantumNeuralNetwork']
